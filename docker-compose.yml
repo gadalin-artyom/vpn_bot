@@ -15,7 +15,7 @@ services:
     build: .
     restart: always
     environment:
-      - BOT_TOKEN=${BOT_TOKEN}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - REMNAWAVE_API_TOKEN=${REMNAWAVE_API_TOKEN}
       - REMNAWAVE_FRONTEND_URL=${REMNAWAVE_FRONTEND_URL}
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}

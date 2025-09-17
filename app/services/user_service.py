@@ -1,237 +1,400 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from app.models.user import User
-from app.models.subscription import Subscription
-from datetime import datetime, timezone, timedelta
-import constants  # type: ignore
-from app.utils.logger import get_logger  # type: ignore
-from app.services.remnawave_api import RemnawaveAPI  # type: ignore
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
 
-logger = get_logger(__name__)
+from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import config
+from app.models.subscription import Subscription
+from app.models.user import User
+from app.services.remnawave_api import RemnawaveAPI
+from constants import (
+    API_EXPIRE_AT_KEY,
+    API_RESPONSE_KEY,
+    API_SHORT_UUID_KEY,
+    API_TRAFFIC_LIMIT_KEY,
+    API_UUID_KEY,
+    DEFAULT_TRAFFIC_USED,
+    ISO_TIMEZONE_REPLACEMENT,
+    SUBSCRIPTION_BASE_URL,
+    TELEGRAM_USERNAME_PREFIX,
+)
+
 
 class UserService:
-    """
-    Сервис для управления пользователями и их подписками.
+    """Сервис для работы с пользователями и подписками."""
 
-    Атрибуты:
-        db (AsyncSession): Асинхронная сессия SQLAlchemy для работы с БД.
-    """
-
-    def __init__(self, db_session: AsyncSession):
-        """
-        Инициализирует сервис с сессией БД.
+    def __init__(self, db_session: AsyncSession) -> None:
+        """Инициализация сервиса.
 
         Args:
-            db_session (AsyncSession): Сессия SQLAlchemy.
+            db_session: Сессия базы данных
         """
         self.db = db_session
+        self.remnawave_api = RemnawaveAPI()
 
-    async def get_or_create_user(self, tg_user_id: int, username: str = None, first_name: str = None, last_name: str = None) -> User:
-        """
-        Получает пользователя из БД по tg_user_id или создает нового, если не найден.
+    async def get_or_create_user(
+        self,
+        tg_user_id: int,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> User:
+        """Получить существующего пользователя или создать нового.
 
         Args:
-            tg_user_id (int): ID пользователя в Telegram.
-            username (str, optional): Имя пользователя в Telegram.
-            first_name (str, optional): Имя пользователя в Telegram.
-            last_name (str, optional): Фамилия пользователя в Telegram.
+            tg_user_id: ID пользователя в Telegram
+            username: Имя пользователя
+            first_name: Имя
+            last_name: Фамилия
 
         Returns:
-            User: Экземпляр модели User.
+            Объект пользователя
         """
-        result = await self.db.execute(select(User).where(User.tg_user_id == tg_user_id))
+        result = await self.db.execute(
+            select(User).where(User.tg_user_id == tg_user_id)
+        )
         user = result.scalar_one_or_none()
 
-        if not user:
-            logger.info(f"Создание нового пользователя TG ID: {tg_user_id}")
-            user = User(
-                tg_user_id=tg_user_id,
-                username=username,
-                first_name=first_name,
-                last_name=last_name
-            )
-            self.db.add(user)
-            await self.db.commit()
-            await self.db.refresh(user)
-            logger.info(f"Пользователь TG ID: {tg_user_id} успешно создан с ID: {user.id}")
-        else:
-            logger.debug(f"Пользователь TG ID: {tg_user_id} уже существует")
+        if user:
+            return user
+
+        user = User(
+            tg_user_id=tg_user_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            created=datetime.utcnow(),
+        )
+        self.db.add(user)
+        await self.db.commit()
+        await self.db.refresh(user)
+        logger.info(f"Создан новый пользователь: {tg_user_id}")
 
         return user
 
-    async def create_user_and_subscription(self, tg_user_id: int, username: str = None, first_name: str = None, last_name: str = None) -> tuple[User, Subscription, str]:
+    async def create_user_and_subscription(
+        self,
+        tg_user_id: int,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+    ) -> Tuple[User, Subscription, str]:
         """
-        Создает пользователя в Remnawave, БД и соответствующую подписку.
+        Создать пользователя и подписку.
 
         Args:
-            tg_user_id (int): ID пользователя в Telegram.
-            username (str, optional): Имя пользователя в Telegram.
-            first_name (str, optional): Имя пользователя в Telegram.
-            last_name (str, optional): Фамилия пользователя в Telegram.
+            tg_user_id: ID пользователя в Telegram
+            username: Имя пользователя
+            first_name: Имя
+            last_name: Фамилия
 
         Returns:
-            tuple[User, Subscription, str]: Кортеж из модели пользователя, модели подписки и ссылки на подписку.
-
-        Raises:
-            Exception: Если возникают ошибки при взаимодействии с API или БД.
+            Кортеж (пользователь, подписка, ссылка на подписку)
         """
-        async with RemnawaveAPI() as remnawave:
-            rem_user_data = await remnawave.get_user_by_telegram_id(tg_user_id)
+        user = await self.get_or_create_user(
+            tg_user_id, username, first_name, last_name
+        )
 
-            if rem_user_data:
-                logger.info(f"Пользователь TG ID: {tg_user_id} уже существует в Remnawave. Используем существующего пользователя.")
-                rem_user_uuid = rem_user_data.get('uuid') or rem_user_data.get('id')
-                if not rem_user_uuid:
-                    logger.error(f"Не найдено поле UUID в ответе от API. Доступные поля: {list(rem_user_data.keys())}")
-                    raise Exception("Не удалось получить UUID пользователя из ответа Remnawave API")
+        result = await self.db.execute(
+            select(Subscription).where(Subscription.user_id == user.id)
+        )
+        existing_subscription = result.scalar_one_or_none()
 
-                result = await self.db.execute(
-                    select(Subscription)
-                    .where(Subscription.user_id == tg_user_id)
-                    .order_by(Subscription.subscription_date.desc())
+        remnawave_user = await self.remnawave_api.get_user_by_telegram_id(
+            tg_user_id
+        )
+
+        if remnawave_user:
+            subscription_link = (
+                await self.remnawave_api.generate_subscription_link(
+                    remnawave_user
                 )
-                subscription = result.scalar_one_or_none()
+            )
+            logger.info(
+                f"Найден существующий пользователь в Remnawave: {tg_user_id}"
+            )
 
-                if subscription:
-                    logger.info(f"Подписка для TG ID: {tg_user_id} уже существует в БД.")
-                    return None, subscription, subscription.vpn_key
-                else:
-                    logger.info(f"Подписка для TG ID: {tg_user_id} не найдена в БД. Создаем новую подписку.")
-                    expiry_date = datetime.now(timezone.utc) + constants.SUBSCRIPTION_DELTA
-                    rem_sub_data = await remnawave.create_subscription(user_uuid=rem_user_uuid, expiry_date=expiry_date)
-                    rem_sub_uuid = rem_sub_data.get('uuid') or rem_sub_data.get('id')
-                    if not rem_sub_uuid:
-                        logger.error(f"Не найдено поле UUID подписки в ответе от API. Доступные поля: {list(rem_sub_data.keys())}")
-                        raise Exception("Не удалось получить UUID подписки из ответа Remnawave API")
+            if not existing_subscription:
+                try:
+                    response_data = remnawave_user.get(
+                        API_RESPONSE_KEY, remnawave_user
+                    )
 
-                    subscription_link = f"{remnawave.frontend_url}/api/sub/{rem_user_data['shortUuid']}"
+                    if (
+                        isinstance(response_data, list)
+                        and len(response_data) > 0
+                    ):
+                        response_data = response_data[0]
+                        logger.info(
+                            f"Извлечен первый элемент из response: "
+                            f"{type(response_data)}"
+                        )
+
+                    expire_at = response_data.get(API_EXPIRE_AT_KEY, "")
+                    subscription_date = None
+
+                    if expire_at:
+                        try:
+                            subscription_date = datetime.fromisoformat(
+                                expire_at.replace(
+                                    "Z", ISO_TIMEZONE_REPLACEMENT
+                                )
+                            )
+                            subscription_date = subscription_date.replace(
+                                tzinfo=None
+                            )
+                        except ValueError:
+                            subscription_date = datetime.utcnow() + timedelta(
+                                days=config.SUBSCRIPTION_DAYS
+                            )
+                    else:
+                        subscription_date = datetime.utcnow() + timedelta(
+                            days=config.SUBSCRIPTION_DAYS
+                        )
+
+                    uuid = response_data.get(API_UUID_KEY, "")
+                    short_uuid = response_data.get(API_SHORT_UUID_KEY, "")
+
+                    if not short_uuid:
+                        logger.error(
+                            f"shortUuid отсутствует в ответе API для "
+                            f"пользователя {tg_user_id}"
+                        )
+                        raise Exception("shortUuid отсутствует в ответе API")
+
+                    if not uuid:
+                        logger.error(
+                            f"uuid отсутствует в ответе API для "
+                            f"пользователя {tg_user_id}"
+                        )
+                        raise Exception("uuid отсутствует в ответе API")
+
+                    vpn_key = f"{SUBSCRIPTION_BASE_URL}/{short_uuid}"
 
                     subscription = Subscription(
-                        user_id=tg_user_id,
-                        vpn_key=subscription_link,
-                        vpn_id=rem_sub_uuid,
-                        subscription_date=expiry_date,
+                        user_id=user.id,
+                        vpn_key=vpn_key,
+                        vpn_id=uuid,
+                        subscription_date=subscription_date,
+                        traffic_limit=response_data.get(
+                            API_TRAFFIC_LIMIT_KEY, DEFAULT_TRAFFIC_USED
+                        ),
+                        creation_time=datetime.utcnow(),
+                        traffic_used=DEFAULT_TRAFFIC_USED,
                     )
+
                     self.db.add(subscription)
                     await self.db.commit()
                     await self.db.refresh(subscription)
-                    logger.info(f"Подписка для TG ID: {tg_user_id} успешно создана с ID: {subscription.id}")
 
-                    user = await self.get_or_create_user(tg_user_id, username, first_name, last_name)
+                    logger.info(
+                        f"Создана локальная запись подписки для существующего "
+                        f"пользователя {tg_user_id}"
+                    )
                     return user, subscription, subscription_link
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка создания локальной записи подписки: {e}"
+                    )
+                    raise
 
-            user = await self.get_or_create_user(tg_user_id, username, first_name, last_name)
-            expiry_date = datetime.now(timezone.utc) + constants.SUBSCRIPTION_DELTA
+            if existing_subscription:
+                logger.info(
+                    f"Использована существующая подписка для {tg_user_id}"
+                )
+                return user, existing_subscription, subscription_link
 
-            rem_user_data = await remnawave.create_user(
-                username=f"tg_{tg_user_id}",
-                tg_user_id=tg_user_id,
-                expire_at=expiry_date
+        try:
+            telegram_username = (
+                username
+                if username
+                else f"{TELEGRAM_USERNAME_PREFIX}{tg_user_id}"
             )
 
-            rem_user_uuid = rem_user_data.get('uuid') or rem_user_data.get('id')
-            if not rem_user_uuid:
-                logger.error(f"Не найдено поле UUID в ответе от API. Доступные поля: {list(rem_user_data.keys())}")
-                raise Exception("Не удалось получить UUID пользователя из ответа Remnawave API")
+            remnawave_user = await self.remnawave_api.create_user(
+                tg_user_id, telegram_username
+            )
 
-            rem_sub_data = await remnawave.create_subscription(user_uuid=rem_user_uuid, expiry_date=expiry_date)
-            rem_sub_uuid = rem_sub_data.get('uuid') or rem_sub_data.get('id')
-            if not rem_sub_uuid:
-                logger.error(f"Не найдено поле UUID подписки в ответе от API. Доступные поля: {list(rem_sub_data.keys())}")
-                raise Exception("Не удалось получить UUID подписки из ответа Remnawave API")
+            subscription_link = (
+                await self.remnawave_api.generate_subscription_link(
+                    remnawave_user
+                )
+            )
 
-            subscription_link = f"{remnawave.frontend_url}/api/sub/{rem_user_data['shortUuid']}"
+            response_data = remnawave_user.get(
+                API_RESPONSE_KEY, remnawave_user
+            )
+
+            if isinstance(response_data, list) and len(response_data) > 0:
+                response_data = response_data[0]
+                logger.info(
+                    f"Извлечен первый элемент из response: "
+                    f"{type(response_data)}"
+                )
+
+            expire_at = response_data.get(API_EXPIRE_AT_KEY, "")
+            subscription_date = None
+
+            if expire_at:
+                try:
+                    subscription_date = datetime.fromisoformat(
+                        expire_at.replace("Z", ISO_TIMEZONE_REPLACEMENT)
+                    )
+                    subscription_date = subscription_date.replace(tzinfo=None)
+                except ValueError:
+                    logger.warning(
+                        f"Некорректный формат даты из API: {expire_at}"
+                    )
+                    subscription_date = datetime.utcnow() + timedelta(
+                        days=config.SUBSCRIPTION_DAYS
+                    )
+            else:
+                logger.warning(
+                    "Дата окончания подписки отсутствует в ответе API"
+                )
+                subscription_date = datetime.utcnow() + timedelta(
+                    days=config.SUBSCRIPTION_DAYS
+                )
+
+            uuid = response_data.get(API_UUID_KEY, "")
+            short_uuid = response_data.get(API_SHORT_UUID_KEY, "")
+
+            if not short_uuid:
+                logger.error(
+                    f"shortUuid отсутствует в ответе API для пользователя "
+                    f"{tg_user_id}"
+                )
+                raise Exception("shortUuid отсутствует в ответе API")
+
+            if not uuid:
+                logger.error(
+                    f"uuid отсутствует в ответе API для пользователя "
+                    f"{tg_user_id}"
+                )
+                raise Exception("uuid отсутствует в ответе API")
+
+            vpn_key = f"{SUBSCRIPTION_BASE_URL}/{short_uuid}"
 
             subscription = Subscription(
-                user_id=tg_user_id,
-                vpn_key=subscription_link,
-                vpn_id=rem_sub_uuid,
-                subscription_date=expiry_date,
+                user_id=user.id,
+                vpn_key=vpn_key,
+                vpn_id=uuid,
+                subscription_date=subscription_date,
+                traffic_limit=response_data.get(
+                    API_TRAFFIC_LIMIT_KEY, DEFAULT_TRAFFIC_USED
+                ),
+                creation_time=datetime.utcnow(),
+                traffic_used=DEFAULT_TRAFFIC_USED,
             )
+
             self.db.add(subscription)
             await self.db.commit()
             await self.db.refresh(subscription)
-            logger.info(f"Подписка для TG ID: {tg_user_id} успешно создана с ID: {subscription.id}")
 
-        return user, subscription, subscription_link
+            logger.info(f"Создана подписка для пользователя {tg_user_id}")
+            return user, subscription, subscription_link
 
-    async def get_user_subscription(self, tg_user_id: int) -> tuple[Subscription, str] | None:
+        except Exception as e:
+            logger.error(f"Ошибка создания подписки для {tg_user_id}: {e}")
+            raise
+
+    async def get_user_subscription(
+        self, tg_user_id: int
+    ) -> Optional[Tuple[Subscription, str]]:
         """
-        Получает последнюю подписку пользователя из БД.
+        Получить подписку пользователя.
 
         Args:
-            tg_user_id (int): ID пользователя в Telegram.
+            tg_user_id: ID пользователя в Telegram
 
         Returns:
-            tuple[Subscription, str] | None: Кортеж из модели подписки и ссылки,
-                                             или None, если подписка не найдена.
+            Кортеж (подписка, ссылка на подписку) или None
         """
         result = await self.db.execute(
-            select(Subscription)
-            .where(Subscription.user_id == tg_user_id)
-            .order_by(Subscription.subscription_date.desc())
+            select(User).where(User.tg_user_id == tg_user_id)
         )
-        subscription = result.scalar_one_or_none()
+        users = result.scalars().all()
 
-        if subscription:
-            subscription_link = subscription.vpn_key
-            return subscription, subscription_link
-        return None
+        if not users:
+            logger.warning(f"Пользователь не найден: {tg_user_id}")
+            return None
 
-    async def renew_user_subscription(self, tg_user_id: int) -> tuple[Subscription, str]:
-        """
-        Продлевает подписку пользователя на 1 год.
+        if len(users) > 1:
+            logger.warning(
+                f"Найдено несколько пользователей с ID {tg_user_id}. "
+                f"Используем первого."
+            )
 
-        Args:
-            tg_user_id (int): ID пользователя в Telegram.
-
-        Returns:
-            tuple[Subscription, str]: Кортеж из обновленной/новой модели подписки и ссылки на подписку.
-
-        Raises:
-            Exception: Если у пользователя нет активной подписки или возникли ошибки API/БД.
-        """
-        logger.info(f"Попытка продления подписки для TG ID: {tg_user_id}")
+        user = users[0]
 
         result = await self.db.execute(
-            select(Subscription)
-            .where(Subscription.user_id == tg_user_id)
-            .order_by(Subscription.subscription_date.desc())
+            select(Subscription).where(Subscription.user_id == user.id)
         )
-        current_subscription = result.scalar_one_or_none()
+        subscriptions = result.scalars().all()
 
-        if not current_subscription:
-            logger.info(f"У пользователя TG ID: {tg_user_id} нет подписки для продления.")
-            raise Exception("У вас нет активной подписки для продления.")
+        if not subscriptions:
+            logger.warning(
+                f"Подписка не найдена для пользователя: {tg_user_id}"
+            )
+            return None
 
-        rem_sub_uuid = current_subscription.vpn_id
-        if not rem_sub_uuid:
-            logger.error(f"UUID подписки Remnawave не найден для TG ID: {tg_user_id}")
-            raise Exception("Ошибка: UUID подписки не найден в локальной БД.")
+        if len(subscriptions) > 1:
+            logger.warning(
+                f"Найдено несколько подписок для пользователя {tg_user_id}. "
+                f"Используем первую."
+            )
 
-        now = datetime.now(timezone.utc)
-        current_expiry = current_subscription.subscription_date
-        base_date_for_renewal = max(now, current_expiry)
-        new_expiry_date = base_date_for_renewal + constants.RENEWAL_DELTA
+        subscription = subscriptions[0]
 
-        logger.info(f"Новая дата окончания подписки для TG ID: {tg_user_id} будет {new_expiry_date}")
+        remnawave_user = await self.remnawave_api.get_user_by_telegram_id(
+            tg_user_id
+        )
+        if remnawave_user:
+            logger.info(
+                f"Тип данных от API: {type(remnawave_user)}, "
+                f"данные: {remnawave_user}"
+            )
 
-        async with RemnawaveAPI() as remnawave:
-            try:
-                await remnawave.renew_subscription(
-                    subscription_uuid=rem_sub_uuid,
-                    new_expiry_date=new_expiry_date,
+            if isinstance(remnawave_user, list):
+                if len(remnawave_user) > 0:
+                    remnawave_user = remnawave_user[0]
+                    logger.info(
+                        f"Извлечен первый элемент из списка: {remnawave_user}"
+                    )
+                else:
+                    logger.warning(
+                        f"Получен пустой список от API для пользователя "
+                        f"{tg_user_id}"
+                    )
+                    return subscription, subscription.vpn_key
+
+            response_data = remnawave_user.get(
+                API_RESPONSE_KEY, remnawave_user
+            )
+
+            if isinstance(response_data, list) and len(response_data) > 0:
+                response_data = response_data[0]
+                logger.info(
+                    f"Извлечен первый элемент из response: "
+                    f"{type(response_data)}"
                 )
-                logger.info(f"Подписка для TG ID: {tg_user_id} успешно продлена в Remnawave API.")
-            except Exception as e:
-                logger.error(f"Ошибка при продлении подписки в Remnawave API для TG ID: {tg_user_id}: {e}")
-                raise Exception(f"Ошибка продления в Remnawave: {e}")
 
-            current_subscription.subscription_date = new_expiry_date
-            self.db.add(current_subscription)
-            await self.db.commit()
-            await self.db.refresh(current_subscription)
-            logger.info(f"Подписка для TG ID: {tg_user_id} успешно обновлена в локальной БД.")
+            short_uuid = response_data.get(API_SHORT_UUID_KEY, "")
+            uuid = response_data.get(API_UUID_KEY, "")
 
-        subscription_link = current_subscription.vpn_key
-        return current_subscription, subscription_link
+            if short_uuid:
+                subscription_link = f"{SUBSCRIPTION_BASE_URL}/{short_uuid}"
+
+                if (
+                    subscription.vpn_key != subscription_link
+                    or subscription.vpn_id != uuid
+                ):
+                    subscription.vpn_key = subscription_link
+                    subscription.vpn_id = uuid
+                    await self.db.commit()
+
+                return subscription, subscription_link
+
+        return subscription, subscription.vpn_key

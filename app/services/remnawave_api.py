@@ -1,249 +1,274 @@
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Union
+
 import aiohttp
-import config  # type: ignore
-import constants  # type: ignore
-from datetime import datetime, timezone
-import uuid
-import string
-import random
-from typing import Optional, Dict, Any
+from loguru import logger
 
-def generate_secure_string(length=16, allowed_chars=string.ascii_letters + string.digits + "_"):
-    """Генерирует безопасную строку заданной длины из допустимых символов"""
-    return ''.join(random.choice(allowed_chars) for _ in range(length))
+import config
+from constants import (
+    API_EXPIRE_AT_KEY,
+    API_RESPONSE_KEY,
+    API_SHORT_UUID_KEY,
+    API_STATUS_KEY,
+    API_TELEGRAM_ID_KEY,
+    API_TRAFFIC_LIMIT_KEY,
+    API_TRAFFIC_LIMIT_STRATEGY_KEY,
+    API_USERNAME_KEY,
+    API_USERS_BY_TELEGRAM_ID_PATH,
+    API_USERS_BY_USERNAME_PATH,
+    API_USERS_PATH,
+    AUTHORIZATION_BEARER_PREFIX,
+    AUTHORIZATION_HEADER,
+    CONTENT_TYPE_HEADER,
+    CONTENT_TYPE_JSON,
+    DEFAULT_TRAFFIC_LIMIT,
+    HTTP_CREATED,
+    HTTP_NOT_FOUND,
+    HTTP_OK,
+    ISO_DATETIME_SUFFIX,
+    SUBSCRIPTION_BASE_URL,
+    TRAFFIC_LIMIT_STRATEGY_NO_RESET,
+    USER_STATUS_ACTIVE,
+)
 
-def generate_trojan_password():
-    """Генерирует пароль для Trojan длиной до 32 символов"""
-    return generate_secure_string(length=32, allowed_chars=string.ascii_letters + string.digits)
-
-def generate_ss_password():
-    """Генерирует пароль для Shadowsocks длиной до 32 символов"""
-    return generate_secure_string(length=32, allowed_chars=string.ascii_letters + string.digits)
-
-def generate_tag():
-    """Генерирует тег длиной до 16 символов, содержащий только заглавные буквы, цифры и подчеркивания"""
-    return generate_secure_string(length=16, allowed_chars=string.ascii_uppercase + string.digits + "_")
 
 class RemnawaveAPI:
-    """
-    Класс для работы с API Remnawave.
+    """Клиент для работы с Remnawave API."""
 
-    Атрибуты:
-        base_url (str): Базовый URL API Remnawave.
-        api_token (str): Токен авторизации для API.
-        frontend_url (str): URL фронтенда Remnawave.
-        session (aiohttp.ClientSession, optional): Асинхронная сессия HTTP.
-    """
-
-    def __init__(self):
-        """Инициализирует клиент API Remnawave."""
-        self.base_url = constants.REMNAWAVE_API_BASE_URL
-        self.api_token = config.REMNAWAVE_API_TOKEN
-        self.frontend_url = config.REMNAWAVE_FRONTEND_URL
-        self.session: Optional[aiohttp.ClientSession] = None
-
-    async def __aenter__(self):
-        """
-        Асинхронный контекстный менеджер для инициализации сессии.
-
-        Returns:
-            RemnawaveAPI: Экземпляр класса с открытой сессией.
-        """
-        self.session = aiohttp.ClientSession()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """
-        Асинхронный контекстный менеджер для закрытия сессии.
-        """
-        if self.session:
-            await self.session.close()
+    def __init__(self) -> None:
+        """Инициализация клиента API."""
+        self.base_url = config.REMNAWAVE_API_BASE_URL
+        self.token = config.REMNAWAVE_API_TOKEN
+        self.timeout = aiohttp.ClientTimeout(total=config.API_TIMEOUT)
 
     def _get_headers(self) -> Dict[str, str]:
-        """
-        Формирует заголовки для HTTP-запросов с токеном авторизации.
+        """Получить заголовки для HTTP-запросов.
 
         Returns:
-            Dict[str, str]: Словарь заголовков.
+            Словарь с заголовками для авторизации
         """
-        return {"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"}
-
-    async def get_user_by_telegram_id(self, telegram_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Получает пользователя по telegram_id.
-
-        Args:
-            telegram_id (int): ID пользователя в Telegram.
-
-        Returns:
-            Optional[Dict[str, Any]]: Данные пользователя или None, если не найден.
-        """
-        url = f"{self.base_url}{constants.REMNAWAVE_USERS_ENDPOINT}?telegramId={telegram_id}"
-        headers = self._get_headers()
-
-        async with self.session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and len(data) > 0:
-                    return data[0]
-                return None
-            elif resp.status == 404:
-                return None
-            else:
-                text = await resp.text()
-                raise Exception(
-                    f"Ошибка получения пользователя по telegram_id в Remnawave API: {resp.status} - {text}"
-                )
-
-    async def create_user(self, username: Optional[str] = None, tg_user_id: Optional[int] = None, expire_at: Optional[datetime] = None) -> Dict[str, Any]:
-        """
-        Создает нового пользователя в системе Remnawave.
-
-        Args:
-            username (str, optional): Имя пользователя. По умолчанию формируется как 'tg_{tg_user_id}'.
-            tg_user_id (int, optional): ID пользователя в Telegram.
-            expire_at (datetime, optional): Дата окончания подписки (UTC).
-
-        Returns:
-            Dict[str, Any]: JSON-ответ от API с данными созданного пользователя.
-
-        Raises:
-            Exception: Если запрос не успешен или не удалось распарсить ответ.
-        """
-        url = f"{self.base_url}{constants.REMNAWAVE_USERS_ENDPOINT}"
-        headers = self._get_headers()
-
-        if username is None and tg_user_id is not None:
-            username = f"tg_{tg_user_id}"
-
-        payload = {
-            "username": username,
-            "status": "ACTIVE",
-            "shortUuid": str(uuid.uuid4()),
-            "trojanPassword": generate_trojan_password(),
-            "vlessUuid": str(uuid.uuid4()),
-            "ssPassword": generate_ss_password(),
-            "trafficLimitBytes": 0,
-            "trafficLimitStrategy": "NO_RESET",
-            "expireAt": expire_at.strftime(constants.ISO_DATE_FORMAT) if expire_at else None,
-            "createdAt": datetime.now(timezone.utc).strftime(constants.ISO_DATE_FORMAT),
-            "lastTrafficResetAt": datetime.now(timezone.utc).strftime(constants.ISO_DATE_FORMAT),
-            "description": "Created by Telegram bot",
-            "tag": generate_tag(),
-            "telegramId": tg_user_id,
-            "email": f"bot_{tg_user_id}@example.com",
-            "hwidDeviceLimit": 0,
-            "activeInternalSquads": []
+        return {
+            AUTHORIZATION_HEADER: f"{AUTHORIZATION_BEARER_PREFIX}{self.token}",
+            CONTENT_TYPE_HEADER: CONTENT_TYPE_JSON,
         }
 
-        if not self.session:
-            raise Exception("Сессия aiohttp не инициализирована")
-
-        async with self.session.post(url, json=payload, headers=headers) as resp:
-            if resp.status in (200, 201):
-                try:
-                    data = await resp.json()
-                    return data
-                except aiohttp.ClientError as e:
-                    text = await resp.text()
-                    raise Exception(
-                        f"Ошибка парсинга JSON ответа при создании пользователя: {e}. "
-                        f"Текст ответа: {text}"
-                    )
-            else:
-                text = await resp.text()
-                raise Exception(
-                    f"Ошибка создания пользователя в Remnawave API: {resp.status} - {text}"
-                )
-
-    async def create_subscription(self, user_uuid: str, expiry_date: datetime) -> Dict[str, Any]:
-        """
-        Создает новую подписку для пользователя в системе Remnawave.
+    async def create_user(
+        self, telegram_id: int, username: str
+    ) -> Dict[str, Any]:
+        """Создать нового пользователя в Remnawave.
 
         Args:
-            user_uuid (str): UUID пользователя в Remnawave.
-            expiry_date (datetime): Дата окончания подписки (UTC).
+            telegram_id: ID пользователя в Telegram
+            username: Имя пользователя
 
         Returns:
-            Dict[str, Any]: JSON-ответ от API с данными созданной подписки.
+            Данные созданного пользователя
 
         Raises:
-            Exception: Если запрос не успешен или не удалось распарсить ответ.
+            Exception: При ошибке создания пользователя
         """
-        url = f"{self.base_url}{constants.REMNAWAVE_SUBSCRIPTIONS_ENDPOINT}"
-        headers = self._get_headers()
+        url = f"{self.base_url}{API_USERS_PATH}"
 
-        expiry_str = expiry_date.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        expire_date = datetime.now() + timedelta(days=config.SUBSCRIPTION_DAYS)
 
         payload = {
-            "userUuid": user_uuid,
-            "expiry": expiry_str,
-            "trafficLimitBytes": 0,
-            "trafficLimitStrategy": "NO_RESET",
-            "description": "Created by Telegram bot",
-            "tag": generate_tag(),
-            "hwidDeviceLimit": 0,
-            "activeInternalSquads": []
+            API_USERNAME_KEY: username,
+            API_TELEGRAM_ID_KEY: telegram_id,
+            API_EXPIRE_AT_KEY: expire_date.isoformat() + ISO_DATETIME_SUFFIX,
+            API_TRAFFIC_LIMIT_KEY: DEFAULT_TRAFFIC_LIMIT,
+            API_TRAFFIC_LIMIT_STRATEGY_KEY: TRAFFIC_LIMIT_STRATEGY_NO_RESET,
+            API_STATUS_KEY: USER_STATUS_ACTIVE,
         }
 
-        if not self.session:
-            raise Exception("Сессия aiohttp не инициализирована")
-
-        async with self.session.post(url, json=payload, headers=headers) as resp:
-            if resp.status in (200, 201):
-                try:
-                    data = await resp.json()
-                    return data
-                except aiohttp.ClientError as e:
-                    text = await resp.text()
-                    raise Exception(
-                        f"Ошибка парсинга JSON ответа при создании подписки: {e}. "
-                        f"Текст ответа: {text}"
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            async with session.post(
+                url, json=payload, headers=self._get_headers()
+            ) as response:
+                if response.status in (HTTP_OK, HTTP_CREATED):
+                    data = await response.json()
+                    logger.info(
+                        f"Пользователь создан в Remnawave: {telegram_id}"
                     )
-            else:
-                text = await resp.text()
-                raise Exception(
-                    f"Ошибка создания подписки в Remnawave API: {resp.status} - {text}"
-                )
+                    return data
+                else:
+                    text = await response.text()
+                    logger.error(
+                        f"Ошибка создания пользователя: {response.status} - "
+                        f"{text}"
+                    )
+                    raise Exception(f"API error {response.status}: {text}")
 
-    async def renew_subscription(self, subscription_uuid: str, new_expiry_date: datetime) -> Dict[str, Any]:
-        """
-        Продлевает существующую подписку в системе Remnawave.
+    async def get_user_by_telegram_id(
+        self, telegram_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Получить пользователя по Telegram ID.
 
         Args:
-            subscription_uuid (str): UUID подписки в Remnawave.
-            new_expiry_date (datetime): Новая дата окончания подписки (ожидается в UTC).
+            telegram_id: ID пользователя в Telegram
 
         Returns:
-            Dict[str, Any]: JSON-ответ от API с обновленными данными подписки.
-
-        Raises:
-            Exception: Если запрос не успешен или не удалось распарсить ответ.
+            Данные пользователя или None, если не найден
         """
-        url = f"{self.base_url}{constants.REMNAWAVE_SUBSCRIPTIONS_ENDPOINT}/{subscription_uuid}"
-        headers = self._get_headers()
+        url = f"{self.base_url}{API_USERS_BY_TELEGRAM_ID_PATH}/{telegram_id}"
 
-        new_expiry_str = new_expiry_date.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+        try:
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.get(
+                    url, headers=self._get_headers()
+                ) as response:
+                    if response.status == HTTP_OK:
+                        data = await response.json()
+                        logger.info(
+                            f"Пользователь найден в Remnawave: {telegram_id}, "
+                            f"тип данных: {type(data)}"
+                        )
 
-        payload = {"expiry": new_expiry_str}
+                        if isinstance(data, list):
+                            logger.info(
+                                f"API вернул список из {len(data)} элементов"
+                            )
+                            if len(data) > 0:
+                                logger.info(
+                                    f"Возвращаем первый элемент: "
+                                    f"{type(data[0])}"
+                                )
+                                return data[
+                                    0
+                                ]
+                            else:
+                                logger.info(
+                                    f"Список пользователей пуст для "
+                                    f"telegram_id: {telegram_id}"
+                                )
+                                return None
+                        else:
+                            logger.info(
+                                f"API вернул объект напрямую: {type(data)}"
+                            )
+                            return data
+                    elif response.status == HTTP_NOT_FOUND:
+                        logger.info(
+                            f"Пользователь не найден в Remnawave: "
+                            f"{telegram_id}"
+                        )
+                        return None
+                    else:
+                        text = await response.text()
+                        logger.error(
+                            f"Ошибка получения пользователя: "
+                            f"{response.status} - {text}"
+                        )
+                        return None
+        except Exception as e:
+            logger.error(f"Исключение при получении пользователя по ID: {e}")
+            return None
 
-        if not self.session:
-            raise Exception("Сессия aiohttp не инициализирована")
+    async def get_user_by_username(
+        self, username: str
+    ) -> Optional[Dict[str, Any]]:
+        """Получить пользователя по имени пользователя.
 
-        async with self.session.patch(url, json=payload, headers=headers) as resp:
-            if resp.status in (200, 204):
-                try:
-                    if resp.status == 204:
-                        return {"uuid": subscription_uuid, "expiry": new_expiry_str}
-                    data = await resp.json()
-                    return data
-                except aiohttp.ClientError as e:
-                    text = await resp.text()
-                    raise Exception(
-                        f"Ошибка парсинга JSON ответа при продлении подписки: {e}. "
-                        f"Текст ответа: {text}"
-                    )
-            else:
-                text = await resp.text()
-                raise Exception(
-                    f"Ошибка продления подписки в Remnawave API: {resp.status} - {text}"
+        Args:
+            username: Имя пользователя
+
+        Returns:
+            Данные пользователя или None, если не найден
+        """
+        url = f"{self.base_url}{API_USERS_BY_USERNAME_PATH}/{username}"
+
+        try:
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.get(
+                    url, headers=self._get_headers()
+                ) as response:
+                    if response.status == HTTP_OK:
+                        data = await response.json()
+                        logger.info(
+                            f"Пользователь найден по username: {username}"
+                        )
+
+                        if isinstance(data, list):
+                            if len(data) > 0:
+                                return data[
+                                    0
+                                ]
+                            else:
+                                logger.info(
+                                    f"Список пользователей пуст для "
+                                    f"username: {username}"
+                                )
+                                return None
+                        else:
+                            return data
+                    else:
+                        text = await response.text()
+                        logger.error(
+                            f"Ошибка получения пользователя по username: "
+                            f"{response.status} - {text}"
+                        )
+                        return None
+        except Exception as e:
+            logger.error(
+                f"Исключение при получении пользователя по username: {e}"
+            )
+            return None
+
+    async def generate_subscription_link(
+        self, user_data: Union[Dict[str, Any], str]
+    ) -> str:
+        """Сгенерировать ссылку на подписку.
+
+        Args:
+            user_data: Данные пользователя или строка
+
+        Returns:
+            Ссылка на подписку
+        """
+        if isinstance(user_data, dict):
+            response_data = user_data.get(API_RESPONSE_KEY, user_data)
+
+            if isinstance(response_data, list) and len(response_data) > 0:
+                response_data = response_data[0]
+                logger.info(
+                    f"В generate_subscription_link извлечен первый элемент "
+                    f"из response: {type(response_data)}"
                 )
+
+            username = response_data.get(API_USERNAME_KEY, "")
+            short_uuid = response_data.get(API_SHORT_UUID_KEY)
+
+            if short_uuid:
+                return f"{SUBSCRIPTION_BASE_URL}/{short_uuid}"
+
+            if username:
+                user_details = await self.get_user_by_username(username)
+                if user_details:
+                    details_response = user_details.get(
+                        API_RESPONSE_KEY, user_details
+                    )
+                    if API_SHORT_UUID_KEY in details_response:
+                        return (
+                            f"{SUBSCRIPTION_BASE_URL}/"
+                            f"{details_response[API_SHORT_UUID_KEY]}"
+                        )
+
+            logger.warning(
+                "Не удалось сформировать ссылку на подписку - "
+                "shortUuid отсутствует"
+            )
+            return ""
+
+        elif isinstance(user_data, str):
+            if user_data.startswith(SUBSCRIPTION_BASE_URL.split("/sub")[0]):
+                return user_data
+
+            if "/" not in user_data:
+                return f"{SUBSCRIPTION_BASE_URL}/{user_data}"
+
+            return user_data
+
+        else:
+            logger.warning(
+                f"Некорректный тип данных для ссылки: {type(user_data)}"
+            )
+            return ""

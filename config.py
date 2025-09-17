@@ -1,13 +1,30 @@
+"""Конфигурация приложения."""
+
 import os
 
 from dotenv import load_dotenv
 
+from constants import (
+    DEFAULT_API_TIMEOUT,
+    DEFAULT_DATABASE_URL,
+    DEFAULT_FRONTEND_URL,
+    DEFAULT_SUBSCRIPTION_DAYS,
+)
+from constants import (
+    REMNAWAVE_API_BASE_URL as API_BASE_URL,
+)
+
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-REMNAWAVE_API_TOKEN = os.getenv("REMNAWAVE_API_TOKEN")
+DATABASE_URL: str = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
-REMNAWAVE_FRONTEND_URL = os.getenv("REMNAWAVE_FRONTEND_URL")
+REMNAWAVE_API_TOKEN: str = os.getenv("REMNAWAVE_API_TOKEN", "")
+REMNAWAVE_API_BASE_URL: str = API_BASE_URL
+REMNAWAVE_FRONTEND_URL: str = os.getenv(
+    "REMNAWAVE_FRONTEND_URL", DEFAULT_FRONTEND_URL
+)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+SUBSCRIPTION_DAYS: int = DEFAULT_SUBSCRIPTION_DAYS
+API_TIMEOUT: int = DEFAULT_API_TIMEOUT

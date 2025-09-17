@@ -3,7 +3,6 @@ name = "vpn-bot"
 version = "0.1.0"
 description = ""
 authors = ["await.art@yandex.ru"]
-readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
@@ -15,28 +14,19 @@ alembic = "^1.16.5"
 python-dotenv = "^1.1.1"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.21.0"
+ruff = "^0.13.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
+select = ["E", "W", "F", "I"]
 line-length = 79
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # Pyflakes
-    "I",   # isort (import sorting)
-]
-ignore = []
 
 [tool.ruff.isort]
 known-first-party = ["app"]
-force-sort-within-sections = true
 
 [tool.ruff.format]
-line-length = 79
-quote-style = "double"
 indent-style = "space"
-skip-magic-trailing-comma = false
+quote-style = "double"
